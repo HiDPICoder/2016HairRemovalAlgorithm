@@ -26,7 +26,7 @@ unsigned long nextPowerOfTwo(unsigned long v)
 }
 
 
-int skelft2DSize(int nx,int ny)
+extern "C" int skelft2DSize(int nx, int ny)
 {
    return max(nextPowerOfTwo(nx), nextPowerOfTwo(ny));
 }
@@ -121,7 +121,7 @@ float encodeBoundary(vector<Coord>& s, int xm, int ym, int xM, int yM, float* si
 
 
 
-float skelft2DMakeBoundary(unsigned char* f, int xm, int ym, int xM, int yM, float* siteParam, int size, short iso, bool thr_upper)
+extern "C" float skelft2DMakeBoundary(unsigned char* f, int xm, int ym, int xM, int yM, float* siteParam, int size, short iso, bool thr_upper)
 {
    bool  scan_bot_to_top  = false;
 
