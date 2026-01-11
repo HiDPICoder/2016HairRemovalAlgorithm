@@ -38,7 +38,7 @@ void loadImage(unsigned char* image)
 	cudaMemcpy(cudaImageOriginal, image, pbaTexSize * pbaTexSize * sizeof(unsigned char), cudaMemcpyHostToDevice);
 }
 
-__global__ void kernelInvertImage(unsigned char* output, int xM, int yM, int size)
+__global__ void kernelInvertImage(unsigned char* output, int xM, int yM, int size, cudaTextureObject_t pbaTexGray)
 {
 	int tx = blockIdx.x * blockDim.x + threadIdx.x;
 	int ty = blockIdx.y * blockDim.y + threadIdx.y;
@@ -46,8 +46,7 @@ __global__ void kernelInvertImage(unsigned char* output, int xM, int yM, int siz
 	if (tx < xM && ty < yM)
 	{
 		int id = TOID(tx, ty, size);
-		unsigned char val = tex1Dfetch(pbaTexGray, id);
-
+		unsigned char val = tex1Dfetch<unsigned char>(pbaTexGray, id);
 		output[id] = 0xff - val;
 	}
 }
@@ -57,9 +56,9 @@ void invertImage()
 	dim3 block = dim3(BLOCKX,BLOCKY);
 	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
 
-	cudaBindTexture(0, pbaTexGray, cudaImageOriginal);
-	kernelInvertImage<<< grid, block >>>(cudaImageOriginal, sizeX, sizeY, pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
+	cudaTextureObject_t texObj = bindTextureObject(cudaImageOriginal, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelInvertImage << < grid, block >> > (cudaImageOriginal, sizeX, sizeY, pbaTexSize, texObj);
+	cudaDestroyTextureObject(texObj);
 }
 
 void clearDetectedGaps()
@@ -67,7 +66,7 @@ void clearDetectedGaps()
 	cudaMemset(cudaImageDetectedGaps, 0, pbaTexSize*pbaTexSize*sizeof(unsigned char));
 }
 
-__global__ void kernelThreshold(unsigned char* output, unsigned char *changed, int level, int xM, int yM, int size)
+__global__ void kernelThreshold(unsigned char* output, unsigned char* changed, int level, int xM, int yM, int size, cudaTextureObject_t pbaTexGray)
 {
 	int tx = blockIdx.x * blockDim.x + threadIdx.x;
 	int ty = blockIdx.y * blockDim.y + threadIdx.y;
@@ -75,7 +74,7 @@ __global__ void kernelThreshold(unsigned char* output, unsigned char *changed, i
 	if (tx < xM && ty < yM)
 	{
 		int id = TOID(tx, ty, size);
-		unsigned char val = tex1Dfetch(pbaTexGray, id);
+		unsigned char val = tex1Dfetch<unsigned char>(pbaTexGray, id);
 
 		output[id] = val >= level ? 0xff : 0;
 		if (val == level) *changed = 1;
@@ -84,159 +83,145 @@ __global__ void kernelThreshold(unsigned char* output, unsigned char *changed, i
 
 bool computeThreshold(int level)
 {
-	dim3 block = dim3(BLOCKX,BLOCKY);
-	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
+	dim3 block = dim3(BLOCKX, BLOCKY);
+	dim3 grid = dim3(pbaTexSize / block.x, pbaTexSize / block.y);
 
 	cudaMemset(pbaTextureThreshDT, 0, sizeof(unsigned char));
 
-	cudaBindTexture(0, pbaTexGray, cudaImageOriginal);
-	kernelThreshold<<< grid, block >>>(cudaImageThresholded, pbaTextureThreshDT, level, sizeX, sizeY, pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
+	cudaTextureObject_t texObj = bindTextureObject(cudaImageOriginal, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelThreshold << < grid, block >> > (cudaImageThresholded, pbaTextureThreshDT, level, sizeX, sizeY, pbaTexSize, texObj);
+	cudaDestroyTextureObject(texObj);
 
 	unsigned char changed;
 	cudaMemcpy(&changed, pbaTextureThreshDT, sizeof(unsigned char), cudaMemcpyDeviceToHost);
 
-	return changed;
+	return changed != 0;
 }
 
-// Performs morphological dilation by tresholding EDT with the dilation circle kernel radius.
 void morphDilate(unsigned char* out, unsigned char* image, float radius)
 {
-	dim3 block = dim3(BLOCKX,BLOCKY);
-	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
+	dim3 block = dim3(BLOCKX, BLOCKY);
+	dim3 grid = dim3(pbaTexSize / block.x, pbaTexSize / block.y);
 
 	int xm = 0, ym = 0, xM = sizeX, yM = sizeY;
+	xM += (int)radius; if (xM > pbaTexSize - 1) xM = pbaTexSize - 1;
+	yM += (int)radius; if (yM > pbaTexSize - 1) yM = pbaTexSize - 1;
 
-	xM += radius; if (xM > pbaTexSize-1) xM = pbaTexSize-1;
-	yM += radius; if (yM > pbaTexSize-1) yM = pbaTexSize-1;
-
-	// Invert image into pbaTextureWork
-	cudaBindTexture(0, pbaTexGray, image);
-	kernelSiteParamInitChar<<<grid,block>>>(pbaTextureWork,pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
+	cudaTextureObject_t texGray = bindTextureObject(image, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelSiteParamInitChar << <grid, block >> > (pbaTextureWork, pbaTexSize, texGray);
+	cudaDestroyTextureObject(texGray);
 
 	skel2DFTCompute(xm, ym, xM, yM, floodBand, maurerBand, colorBand);
 
-	// Compute dilation from FT
-	cudaBindTexture(0, pbaTexColor, pbaTextureFT);
-	kernelThresholdDT<<< grid, block >>>(out, pbaTexSize, radius*radius, xm-1, ym-1, xM+1, yM+1);
-	cudaUnbindTexture(pbaTexColor);
+	cudaTextureObject_t texColor = bindTextureObject(pbaTextureFT, pbaTexSize * pbaTexSize * sizeof(short2));
+	kernelThresholdDT << < grid, block >> > (out, pbaTexSize, radius * radius, xm - 1, ym - 1, xM + 1, yM + 1, texColor);
+	cudaDestroyTextureObject(texColor);
 }
 
-// Performs morphological erosion by tresholding EDT with the erosion circle kernel radius.
 void morphErode(unsigned char* out, unsigned char* image, float radius)
 {
-	dim3 block = dim3(BLOCKX,BLOCKY);
-	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
+	dim3 block = dim3(BLOCKX, BLOCKY);
+	dim3 grid = dim3(pbaTexSize / block.x, pbaTexSize / block.y);
 
 	int xm = 0, ym = 0, xM = sizeX, yM = sizeY;
+	xM += (int)radius; if (xM > pbaTexSize - 1) xM = pbaTexSize - 1;
+	yM += (int)radius; if (yM > pbaTexSize - 1) yM = pbaTexSize - 1;
 
-	xM += radius; if (xM > pbaTexSize-1) xM = pbaTexSize-1;
-	yM += radius; if (yM > pbaTexSize-1) yM = pbaTexSize-1;
-
-	// Copy image into pbaTextureWork
-	cudaBindTexture(0, pbaTexGray, image);
-	kernelSiteParamInitCharInverse<<<grid,block>>>(pbaTextureWork,pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
+	cudaTextureObject_t texGray = bindTextureObject(image, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelSiteParamInitCharInverse << <grid, block >> > (pbaTextureWork, pbaTexSize, texGray);
+	cudaDestroyTextureObject(texGray);
 
 	skel2DFTCompute(xm, ym, xM, yM, floodBand, maurerBand, colorBand);
 
-	// Compute erosion from FT
-	cudaBindTexture(0, pbaTexColor, pbaTextureFT);
-	kernelThresholdDTInverse<<< grid, block >>>(out, pbaTexSize, radius*radius, xm-1, ym-1, xM+1, yM+1);
-	cudaUnbindTexture(pbaTexColor);
+	cudaTextureObject_t texColor = bindTextureObject(pbaTextureFT, pbaTexSize * pbaTexSize * sizeof(short2));
+	kernelThresholdDTInverse << < grid, block >> > (out, pbaTexSize, radius * radius, xm - 1, ym - 1, xM + 1, yM + 1, texColor);
+	cudaDestroyTextureObject(texColor);
 }
 
-// Compute both open-close and close-open and keep in CUDA memory as needed later.
-void computeMorphs(unsigned char *out, float radius)
+void computeMorphs(unsigned char* out, float radius)
 {
 	morphDilate(cudaImageOpenClose, cudaImageThresholded, radius);
-	morphErode(cudaImageOpenClose, cudaImageOpenClose, radius*2.0f);
+	morphErode(cudaImageOpenClose, cudaImageOpenClose, radius * 2.0f);
 	morphDilate(cudaImageOpenClose, cudaImageOpenClose, radius);
 
 	morphErode(cudaImageCloseOpen, cudaImageThresholded, radius);
-	morphDilate(cudaImageCloseOpen, cudaImageCloseOpen, radius*2.0f);
+	morphDilate(cudaImageCloseOpen, cudaImageCloseOpen, radius * 2.0f);
 	morphErode(cudaImageCloseOpen, cudaImageCloseOpen, radius);
 
 	cudaMemcpy(out, cudaImageOpenClose, pbaTexSize * pbaTexSize * sizeof(unsigned char), cudaMemcpyDeviceToHost);
 }
 
 // Only selects inflated pixels which were not in the original image, i.e. the gaps we are interested in
-__global__ void kernelReconstruct(unsigned char* output, int size,int level)
+__global__ void kernelReconstruct(unsigned char* output, int size, int level, cudaTextureObject_t pbaTexGray, cudaTextureObject_t pbaTexOriginal)
 {
 	int tx = blockIdx.x * blockDim.x + threadIdx.x;
 	int ty = blockIdx.y * blockDim.y + threadIdx.y;
 
-	int id = TOID(tx, ty, size);
-	unsigned char infl = tex1Dfetch(pbaTexGray, id); // inflated pixels from skeleton
-	unsigned char im = tex1Dfetch(pbaTexOriginal, id); // original image
+	if (tx < size && ty < size) {
+		int id = TOID(tx, ty, size);
+		unsigned char infl = tex1Dfetch<unsigned char>(pbaTexGray, id); // inflated pixels from skeleton
+		unsigned char im = tex1Dfetch<unsigned char>(pbaTexOriginal, id); // original image
 
-	if (im && infl) output[id] = level; // Outside of image but inside inflation are part of reconstruction
+		if (im && infl) output[id] = (unsigned char)level;
+	}
 }
 
-// From a list of skeleton points in `pbaTexColor`, draw circles with a radius determined by a lineair
-// combination from the EDTs to both open-close and close-open image. This is a very expensive operation!
-__global__ void kernelSplatInterpolate(unsigned char* output, float lambda, int size, int numpts, short xm, short ym, short xM, short yM)
+__global__ void kernelSplatInterpolate(unsigned char* output, float lambda, int size, int numpts, short xm, short ym, short xM, short yM, cudaTextureObject_t pbaTexColor, cudaTextureObject_t pbaTexLinks, cudaTextureObject_t pbaTexColor2)
 {
-    int offs = blockIdx.x * blockDim.x + threadIdx.x;
+	int offs = blockIdx.x * blockDim.x + threadIdx.x;
 
-	if (offs < numpts)														//careful not to index outside the skel-vector..
+	if (offs < numpts)
 	{
-		short2     skel = tex1Dfetch(pbaTexColor,offs);						//splat the skel-point whose coords are at location offs in pbaTexColor[]
-		int          tx = skel.x, ty = skel.y;
-		int          id = TOID(tx,ty,size);
-		short2 voroidOC = tex1Dfetch(pbaTexLinks,id);						//voroid of open-close to calculate distance from
-		short2 voroidCO = tex1Dfetch(pbaTexColor2,id);						//voroid of close-open to calculate distance from
+		short2 skel = tex1Dfetch<short2>(pbaTexColor, offs);
+		int tx = skel.x, ty = skel.y;
+		int id = TOID(tx, ty, size);
+		short2 voroidOC = tex1Dfetch<short2>(pbaTexLinks, id);
+		short2 voroidCO = tex1Dfetch<short2>(pbaTexColor2, id);
 
-		float      dOC2 = (tx-voroidOC.x)*(tx-voroidOC.x)+(ty-voroidOC.y)*(ty-voroidOC.y);
-		float      dCO2 = (tx-voroidCO.x)*(tx-voroidCO.x)+(ty-voroidCO.y)*(ty-voroidCO.y);
-		float        d2 = (1-lambda) * dOC2 + lambda * dCO2;
-		short         d = sqrtf(d2);
+		float dOC2 = (float)(tx - voroidOC.x) * (tx - voroidOC.x) + (float)(ty - voroidOC.y) * (ty - voroidOC.y);
+		float dCO2 = (float)(tx - voroidCO.x) * (tx - voroidCO.x) + (float)(ty - voroidCO.y) * (ty - voroidCO.y);
+		float d2 = (1.0f - lambda) * dOC2 + lambda * dCO2;
+		short d = (short)sqrtf(d2);
 
-		short jmin = max(ty-d,ym);
-		short jmax = min(ty+d,yM);
+		short jmin = max((int)(ty - d), (int)ym);
+		short jmax = min((int)(ty + d), (int)yM);
 
-		for (short j=jmin;j<=jmax;++j)										//bounding-box of the splat at 'skel'
+		for (short j = jmin; j <= jmax; ++j)
 		{
-			short w = sqrtf(d2-(j-ty)*(j-ty));
-			short imin = max(tx-w,xm);
-			short imax = min(tx+w,xM);
+			short w = (short)sqrtf(fmaxf(0.0f, d2 - (float)(j - ty) * (j - ty)));
+			short imin = max((int)(tx - w), (int)xm);
+			short imax = min((int)(tx + w), (int)xM);
 
-			int id = TOID(imin,j,size);
-
-			for (short i=imin;i<=imax;++i)
+			int start_id = TOID(imin, j, size);
+			for (short i = imin; i <= imax; ++i)
 			{
-				output[id++] = 0xff;
+				output[start_id++] = 0xff;
 			}
 		}
-    }
+	}
 }
 
-// Also draws circles centered at skeleton pixels with radius determined by EDT to open-close and close-open image.
-// Different from above function in that for every pixel in the image, it iterates over all skeleton pixels to
-// determine if it is close enough to fall in its circle. This seems somewhat faster when there are few skel pixels.
-__global__ void kernelSplatInterpolateFullScan(unsigned char* output,float lambda, int size, int numpts, short xm, short ym, short xM, short yM)
+__global__ void kernelSplatInterpolateFullScan(unsigned char* output, float lambda, int size, int numpts, short xm, short ym, short xM, short yM, cudaTextureObject_t pbaTexColor, cudaTextureObject_t pbaTexLinks, cudaTextureObject_t pbaTexColor2)
 {
-    int tx = blockIdx.x * blockDim.x + threadIdx.x;
+	int tx = blockIdx.x * blockDim.x + threadIdx.x;
 	int ty = blockIdx.y * blockDim.y + threadIdx.y;
 
-	int id = TOID(tx,ty,size);
-
-	if (tx>xm && ty>ym && tx<xM && ty<yM)										//careful not to index outside the skel-vector..
+	if (tx > xm && ty > ym && tx < xM && ty < yM)
 	{
-		for (int i=0; i<numpts; i++)
+		int id = TOID(tx, ty, size);
+		for (int i = 0; i < numpts; i++)
 		{
-			short2 skel = tex1Dfetch(pbaTexColor,i);
-			int sid = TOID(skel.x,skel.y,size);
+			short2 skel = tex1Dfetch<short2>(pbaTexColor, i);
+			int sid = TOID(skel.x, skel.y, size);
 
-			short2 voroidOC = tex1Dfetch(pbaTexLinks,sid);						//voroid of open-close to calculate distance from
-			short2 voroidCO = tex1Dfetch(pbaTexColor2,sid);						//voroid of close-open to calculate distance from
+			short2 voroidOC = tex1Dfetch<short2>(pbaTexLinks, sid);
+			short2 voroidCO = tex1Dfetch<short2>(pbaTexColor2, sid);
 
-			float      dOC2 = (skel.x-voroidOC.x)*(skel.x-voroidOC.x)+(skel.y-voroidOC.y)*(skel.y-voroidOC.y);
-			float      dCO2 = (skel.x-voroidCO.x)*(skel.x-voroidCO.x)+(skel.y-voroidCO.y)*(skel.y-voroidCO.y);
-			float      dft2 = (1-lambda) * dOC2 + lambda * dCO2;
+			float dOC2 = (float)(skel.x - voroidOC.x) * (skel.x - voroidOC.x) + (float)(skel.y - voroidOC.y) * (skel.y - voroidOC.y);
+			float dCO2 = (float)(skel.x - voroidCO.x) * (skel.x - voroidCO.x) + (float)(skel.y - voroidCO.y) * (skel.y - voroidCO.y);
+			float dft2 = (1.0f - lambda) * dOC2 + lambda * dCO2;
 
-			float ds2 = (skel.x-tx)*(skel.x-tx)+(skel.y-ty)*(skel.y-ty); // distance from skel to pixel
+			float ds2 = (float)(skel.x - tx) * (skel.x - tx) + (float)(skel.y - ty) * (skel.y - ty);
 
 			if (ds2 <= dft2)
 			{
@@ -244,100 +229,86 @@ __global__ void kernelSplatInterpolateFullScan(unsigned char* output,float lambd
 				break;
 			}
 		}
-    }
+	}
 }
-
 // Inflate the skeleton currently in `pbaTextureThreshSkel` based on the DFT to open-close and close-open.
 int skelft2DInflateInterpolate(unsigned char* result,float lambda,short xm,short ym,short xM,short yM)
 {
-	dim3 block = dim3(BLOCKX,BLOCKY);
-	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
+	dim3 block = dim3(BLOCKX, BLOCKY);
+	dim3 grid = dim3(pbaTexSize / block.x, pbaTexSize / block.y);
 
-	unsigned int num_pts = 0;													//Set topo_gc to 0
-	cudaMemcpyToSymbol(topo_gc,&num_pts,sizeof(unsigned int),0,cudaMemcpyHostToDevice);
+	unsigned int num_pts = 0;
+	cudaMemcpyToSymbol(topo_gc, &num_pts, sizeof(unsigned int), 0, cudaMemcpyHostToDevice);
 
-	cudaBindTexture(0, pbaTexGray, pbaTextureThreshSkel);						//This is the skeleton
-	cudaBindTexture(0, pbaTexOriginal, cudaImageThresholded);						//This is the original image, used as mask
-	cudaBindTexture(0, pbaTexOpenClosed, cudaImageOpenClose);						//This is the open-closed image, used as skeleton mask
-    kernelGatherSkelPixelsMasked<<< grid, block >>>(pbaTextureWorkTopo,pbaTexSize,xm,ym,xM,yM);
-	cudaUnbindTexture(pbaTexGray);
-	cudaUnbindTexture(pbaTexOriginal);
-	cudaUnbindTexture(pbaTexOpenClosed);
+	cudaTextureObject_t texGray = bindTextureObject(pbaTextureThreshSkel, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	cudaTextureObject_t texOrig = bindTextureObject(cudaImageThresholded, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	cudaTextureObject_t texOpenClosed = bindTextureObject(cudaImageOpenClose, pbaTexSize * pbaTexSize * sizeof(unsigned char));
 
-	cudaMemcpyFromSymbol(&num_pts,topo_gc,sizeof(unsigned int),0,cudaMemcpyDeviceToHost);//Get #skel-points we have detected from the device-var from CUDA
+	kernelGatherSkelPixelsMasked << < grid, block >> > (pbaTextureWorkTopo, pbaTexSize, xm, ym, xM, yM, texGray, texOrig, texOpenClosed);
 
+	cudaDestroyTextureObject(texGray);
+	cudaDestroyTextureObject(texOrig);
+	cudaDestroyTextureObject(texOpenClosed);
 
-	cudaMemset(pbaTextureThreshDT,0,sizeof(unsigned char)*pbaTexSize*pbaTexSize);//Faster to zero result and then fill only 1-values (see kernel)
+	cudaMemcpyFromSymbol(&num_pts, topo_gc, sizeof(unsigned int), 0, cudaMemcpyDeviceToHost);
+	cudaMemset(pbaTextureThreshDT, 0, sizeof(unsigned char) * pbaTexSize * pbaTexSize);
 
-	cudaBindTexture(0, pbaTexColor, pbaTextureWorkTopo);						//Skel points are in a short2-vector in work topo list
-	cudaBindTexture(0, pbaTexColor2, pbaTextureFT);								//Also bind the FT to calculate the distance from
-	cudaBindTexture(0, pbaTexLinks, pbaTextureSkeletonFT);
+	cudaTextureObject_t texColor = bindTextureObject(pbaTextureWorkTopo, pbaTexSize * pbaTexSize * sizeof(short2));
+	cudaTextureObject_t texColor2 = bindTextureObject(pbaTextureFT, pbaTexSize * pbaTexSize * sizeof(short2));
+	cudaTextureObject_t texLinks = bindTextureObject(pbaTextureSkeletonFT, pbaTexSize * pbaTexSize * sizeof(short2));
 
-	// For a small number of points, comparing every pixel with all points seems cheaper.
 	if (num_pts > 300)
 	{
-		block = dim3(BLOCKX*BLOCKY);												//Prepare the splatting kernel: this operates on a vector of 2D skel points
-		int numpts_b = (num_pts/block.x+1)*block.x;									//Find higher multiple of blocksize than # skel points
-		grid  = dim3(numpts_b/block.x);
-
-		kernelSplatInterpolate<<< grid, block >>>(pbaTextureThreshDT, lambda, pbaTexSize, num_pts, xm, ym, xM, yM);
+		dim3 blockSplat(BLOCKX * BLOCKY);
+		dim3 gridSplat((num_pts + blockSplat.x - 1) / blockSplat.x);
+		kernelSplatInterpolate << < gridSplat, blockSplat >> > (pbaTextureThreshDT, lambda, pbaTexSize, (int)num_pts, xm, ym, xM, yM, texColor, texLinks, texColor2);
 	}
 	else
 	{
-		kernelSplatInterpolateFullScan<<< grid, block >>>(pbaTextureThreshDT, lambda, pbaTexSize, num_pts, xm, ym, xM, yM);
+		kernelSplatInterpolateFullScan << < grid, block >> > (pbaTextureThreshDT, lambda, pbaTexSize, (int)num_pts, xm, ym, xM, yM, texColor, texLinks, texColor2);
 	}
 
-	cudaUnbindTexture(pbaTexColor);
-	cudaUnbindTexture(pbaTexColor2);
-	cudaUnbindTexture(pbaTexLinks);
+	cudaDestroyTextureObject(texColor);
+	cudaDestroyTextureObject(texColor2);
+	cudaDestroyTextureObject(texLinks);
 
 	if (result) cudaMemcpy(result, pbaTextureThreshDT, pbaTexSize * pbaTexSize * sizeof(unsigned char), cudaMemcpyDeviceToHost);
 
-	//Return #skel points processed
-	return num_pts;
+	return (int)num_pts;
 }
 
 // Perform gap detection algorithm described in Sobiecki et al. (Gap-sensitive segmentation
 // and restoration of digital images. In: Proc. CGVC. pp. 136–144. Eurographics (2014))
 void computeDetectedGaps(int level, float lambda)
 {
-	dim3 block = dim3(BLOCKX,BLOCKY);
-	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
+	dim3 block = dim3(BLOCKX, BLOCKY);
+	dim3 grid = dim3(pbaTexSize / block.x, pbaTexSize / block.y);
 
 	int xm = 0, ym = 0, xM = sizeX, yM = sizeY;
 
-	// Copy image into pbaTextureWork
-	cudaBindTexture(0, pbaTexGray, cudaImageOpenClose);
-	kernelSiteParamInitChar<<<grid,block>>>(pbaTextureWork,pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
+	cudaTextureObject_t texGray = bindTextureObject(cudaImageOpenClose, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelSiteParamInitChar << <grid, block >> > (pbaTextureWork, pbaTexSize, texGray);
+	cudaDestroyTextureObject(texGray);
 
-	// Calculate FT from open-close image, used to determine inflation distances from
 	skel2DFTCompute(xm, ym, xM, yM, floodBand, maurerBand, colorBand);
-
 	cudaMemcpy(pbaTextureSkeletonFT, pbaTextureFT, pbaTexSize * pbaTexSize * sizeof(short2), cudaMemcpyDeviceToDevice);
 
+	texGray = bindTextureObject(cudaImageCloseOpen, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelSiteParamInitChar << <grid, block >> > (pbaTextureWork, pbaTexSize, texGray);
+	cudaDestroyTextureObject(texGray);
 
-
-	// Copy image into pbaTextureWork
-	cudaBindTexture(0, pbaTexGray, cudaImageCloseOpen);
-	kernelSiteParamInitChar<<<grid,block>>>(pbaTextureWork,pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
-
-	// Calculate FT from close-open image, used to determine inflation distances from
 	skel2DFTCompute(xm, ym, xM, yM, floodBand, maurerBand, colorBand);
 
-	// Inflate skeleton
 	int inflated = skelft2DInflateInterpolate(NULL, lambda, xm, ym, xM, yM);
 
 	if (inflated > 0)
 	{
-		// Compute reconstructed pixels
-		cudaBindTexture(0, pbaTexGray, pbaTextureThreshDT); // inflated result is in pbaTextureThreshDT
-		cudaBindTexture(0, pbaTexOriginal, cudaImageThresholded);
-		kernelReconstruct<<<grid,block>>>(cudaImageDetectedGaps,pbaTexSize,level);
-		cudaUnbindTexture(pbaTexGray);
-		cudaUnbindTexture(pbaTexOriginal);
-    }
+		cudaTextureObject_t texRes = bindTextureObject(pbaTextureThreshDT, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+		cudaTextureObject_t texOrig = bindTextureObject(cudaImageThresholded, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+		kernelReconstruct << <grid, block >> > (cudaImageDetectedGaps, pbaTexSize, level, texRes, texOrig);
+		cudaDestroyTextureObject(texRes);
+		cudaDestroyTextureObject(texOrig);
+	}
 }
 
 void copyDetectedGapsD2H(unsigned char* out)
@@ -348,27 +319,22 @@ void copyDetectedGapsD2H(unsigned char* out)
 // Compute the final inflation from the filtered skeleton, this results in the final, filtered hair mask
 void computeInflation(unsigned char* result, unsigned char* detectedGaps, unsigned char* skeleton)
 {
-	cudaMemcpy(pbaTextureThreshDT, detectedGaps, pbaTexSize*pbaTexSize*sizeof(unsigned char), cudaMemcpyHostToDevice);
-	cudaMemcpy(pbaTextureThreshSkel, skeleton, pbaTexSize*pbaTexSize*sizeof(unsigned char), cudaMemcpyHostToDevice);
+	cudaMemcpy(pbaTextureThreshDT, detectedGaps, pbaTexSize * pbaTexSize * sizeof(unsigned char), cudaMemcpyHostToDevice);
+	cudaMemcpy(pbaTextureThreshSkel, skeleton, pbaTexSize * pbaTexSize * sizeof(unsigned char), cudaMemcpyHostToDevice);
 
-	dim3 block = dim3(BLOCKX,BLOCKY);
-	dim3 grid  = dim3(pbaTexSize/block.x,pbaTexSize/block.y);
+	dim3 block = dim3(BLOCKX, BLOCKY);
+	dim3 grid = dim3(pbaTexSize / block.x, pbaTexSize / block.y);
 
 	int xm = 0, ym = 0, xM = sizeX, yM = sizeY;
 
-	// Copy image into pbaTextureWork
-	cudaBindTexture(0, pbaTexGray, pbaTextureThreshDT);
-	kernelSiteParamInitCharInverse<<<grid,block>>>(pbaTextureWork,pbaTexSize);
-	cudaUnbindTexture(pbaTexGray);
+	cudaTextureObject_t texGray = bindTextureObject(pbaTextureThreshDT, pbaTexSize * pbaTexSize * sizeof(unsigned char));
+	kernelSiteParamInitCharInverse << <grid, block >> > (pbaTextureWork, pbaTexSize, texGray);
+	cudaDestroyTextureObject(texGray);
 
-	// Calculate FT from detectedGaps image, used to determine inflation distances from
 	skel2DFTCompute(xm, ym, xM, yM, floodBand, maurerBand, colorBand);
-
 	skelft2DInflate(NULL, xm, ym, xM, yM);
 
-	// Extend result by 2 pixels to properly overlap areas to be inpainted
 	morphDilate(pbaTextureThreshDT, pbaTextureThreshDT, 2.0f);
-
 	cudaMemcpy(result, pbaTextureThreshDT, pbaTexSize * pbaTexSize * sizeof(unsigned char), cudaMemcpyDeviceToHost);
 }
 
