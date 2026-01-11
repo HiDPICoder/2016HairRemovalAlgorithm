@@ -100,7 +100,7 @@ template <class T> IMAGE<T>* IMAGE<T>::readBMP(char* fname)
 
 template <class T> IMAGE<T>* IMAGE<T>::readPPM(char* fname)
 {
-   FILE* fp = fopen(fname,"r"); if (!fp) return 0;
+   FILE* fp = fopen(fname,"rb"); if (!fp) return 0;
 
    const int SIZE = 1024*3;
    char buf[SIZE]; int dimX,dimY,range;
@@ -146,7 +146,7 @@ template <class T> IMAGE<T>* IMAGE<T>::readPPM(char* fname)
 
 template <class T> void IMAGE<T>::writePPM(const char* file)
 {
-   FILE* fp = fopen(file,"w");
+   FILE* fp = fopen(file,"wb");
    if (!fp) return;
 
    const int SIZE = 3000;
