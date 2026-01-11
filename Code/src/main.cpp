@@ -34,14 +34,14 @@ static int mpi_nproc = 0;
 #include <queue>
 #include <limits>
 #include <time.h>
-#include <unistd.h>
 
 #include "color.h"
 #include "connected.h"
 #include "inpainting.h"
 #include "api.h"
 #include "pgm.h"
-
+#include <filesystem>
+#include <locale>
 
 using namespace std;
 
@@ -132,7 +132,7 @@ void computeInflation(unsigned char* result, unsigned char* reconstruction, unsi
 
 
 // Used in Connected Component algorithm to determine if some pixel values are in the same component
-struct is_same_component : std::binary_function <unsigned char,unsigned char,bool>
+struct is_same_component
 {
 	bool operator() (const unsigned char& x, const unsigned char& y) const
 	{
@@ -155,13 +155,18 @@ struct is_not_background
 
 void ensureOutputDir()
 {
-	const char *output = options.output ?: "./output";
-	char *command = new char[strlen(output) + 100];
+	// Use standard ternary operator instead of GCC extension '?:'
+	const char* output = options.output ? options.output : "./output";
 
-	sprintf(command, "mkdir -p \"%s\"", output);
-	system(command);
-
-	delete[] command;
+	try {
+		// Automatically handles nested directories (like "mkdir -p")
+		std::filesystem::create_directories(output);
+	}
+	catch (const std::exception& e) {
+		if (MPI_IS_ROOT) {
+			cerr << "Error creating output directory: " << e.what() << endl;
+		}
+	}
 }
 
 char* outputdir(const char* file)
@@ -169,7 +174,7 @@ char* outputdir(const char* file)
 	// Buffer overflow
 	static char name[1024];
 
-	sprintf(name, "%s/%s%s", options.output ?: "./output", filePrefix, file);
+	sprintf(name, "%s/%s%s", options.output ? options.output : "./output", filePrefix, file);
 
 	return name;
 }
@@ -212,55 +217,81 @@ void printUsage(char **argv)
 
 void parseOptions(int argc, char** argv)
 {
-	if (argc<2) printUsage(argv);
+	if (argc < 2) printUsage(argv);
 
-	opterr = 0;
-	char c;
-	while ((c = getopt(argc, argv, "f:S:r:l:J:p:b:B:s:d:D:o:w:vg")) != -1)
+	for (int i = 1; i < argc; ++i)
 	{
-		switch (c)
+		// Check if the argument is an option (starts with '-')
+		if (argv[i][0] == '-')
 		{
-			case 'f': options.file = optarg; break;
-			case 'S': options.skeletonLevel = atof(optarg); break;
-			case 'r': options.morphRadius = atof(optarg); break;
-			case 'l': options.lambda = atof(optarg); break;
-			case 'J': options.junctionRatioThreshold = atof(optarg); break;
+			char optionChar = argv[i][1];
 
-			case 'p': options.boundaryPercentage = atof(optarg); break;
-			case 'b': options.minSkeletonLevel = atof(optarg); break;
-			case 'B': options.maxSkeletonLevel = atof(optarg); break;
+			// 1. Handle flags that do NOT take arguments
+			if (optionChar == 'v') {
+				options.verbose = true;
+				continue;
+			}
+			if (optionChar == 'g') {
+				options.gui = true;
+				continue;
+			}
 
-			case 's': options.maxDistanceScaling = atof(optarg); break;
-			case 'd': options.minDistanceThreshold = atof(optarg); break;
-			case 'D': options.maxDistanceThreshold = atof(optarg); break;
+			// 2. Handle options that REQUIRE arguments
+			// Ensure there is a next argument available
+			if (i + 1 >= argc) {
+				if (MPI_IS_ROOT) cerr << "Missing argument for option -" << optionChar << endl;
+				printUsage(argv);
+			}
 
-			case 'o': options.output = optarg; break;
-#if GUI_SUPPORT
-#endif
+			// Advance to the next argument to get the value
+			char* optArg = argv[++i];
+
+			switch (optionChar)
+			{
+			case 'f': options.file = optArg; break;
+			case 'S': options.skeletonLevel = atof(optArg); break;
+			case 'r': options.morphRadius = atof(optArg); break;
+			case 'l': options.lambda = atof(optArg); break;
+			case 'J': options.junctionRatioThreshold = atof(optArg); break;
+
+			case 'p': options.boundaryPercentage = atof(optArg); break;
+			case 'b': options.minSkeletonLevel = atof(optArg); break;
+			case 'B': options.maxSkeletonLevel = atof(optArg); break;
+
+			case 's': options.maxDistanceScaling = atof(optArg); break;
+			case 'd': options.minDistanceThreshold = atof(optArg); break;
+			case 'D': options.maxDistanceThreshold = atof(optArg); break;
+
+			case 'o': options.output = optArg; break;
+
 			case 'w':
-				switch (atoi(optarg))
+				switch (atoi(optArg))
 				{
-					case 0: options.format = Options::ORIGINAL; break;
-					case 1: options.format = Options::INVERTED; break;
-					case 2: options.format = Options::BOTH; break;
-					case 3: options.format = Options::LIKELIEST; break;
-					default: printUsage(argv); break;
+				case 0: options.format = Options::ORIGINAL; break;
+				case 1: options.format = Options::INVERTED; break;
+				case 2: options.format = Options::BOTH; break;
+				case 3: options.format = Options::LIKELIEST; break;
+				default: printUsage(argv); break;
 				}
 				break;
-			case 'v': options.verbose = true; break;
-			case 'g': options.gui = true; break;
-			case '?': printUsage(argv); break;
+
+			default:
+				if (MPI_IS_ROOT) cerr << "Unknown option -" << optionChar << endl;
+				printUsage(argv);
+			}
+		}
+		else
+		{
+			// Handle positional arguments or excessive arguments
+			if (MPI_IS_ROOT) cerr << "Excessive arguments are ignored: " << argv[i] << endl;
 		}
 	}
 
+	// Post-parsing validation
 	if (!options.file)
 	{
 		if (MPI_IS_ROOT) cerr << "No input file given." << endl;
 		exit(3);
-	}
-	else if (optind != argc)
-	{
-		if (MPI_IS_ROOT) cerr << "Excessive arguments are ignored." << endl;
 	}
 
 #if MPI_SUPPORT
@@ -273,7 +304,6 @@ void parseOptions(int argc, char** argv)
 
 	ensureOutputDir();
 }
-
 void showInfo()
 {
 	if (!MPI_IS_ROOT || !options.verbose) return;
@@ -1242,6 +1272,7 @@ void cleanup()
 
 int main(int argc,char **argv)
 {
+	std::locale::global(std::locale("C"));
 	int cudaDevices = verifyCudaAvailability();
 
 	atexit(cleanup);

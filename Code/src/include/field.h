@@ -10,11 +10,6 @@
 #include <iostream>
 #include <fstream>
 #include <stdlib.h>
-#ifdef __APPLE__
-#include <GLUT/glut.h>
-#else
-#include <GL/freeglut.h>
-#endif
 #include <map>
 #include <io.h>
 #include "genrl.h"
@@ -62,9 +57,6 @@ public:
 	  void		writeGrid(char*);			//write field to VTK struct grid data file
 	  void		writePPM(const char*) const;			//write field to PPM RGB file
 	  void		writePGM(const char*) const;	//write field to PGM grayscale file
-          void          display(const char* =0);                //make a GLUT window w. title to show this
-	  void          display(int,const char* =0);		//show this in already made i-th GLUT window
-	  static void   drawColor(bool);			//draw using rainbow colormap or b/w
 
 	  static FIELD* read(const char*);				//read field from data file in various formats
           static FILE_TYPE
@@ -85,8 +77,6 @@ public:
                         getShort(fstream&);
           static std::map<int,FIELD*> fields;
 	  static bool   draw_color;
-          static void   draw_cb();
-          void          draw();
           int		nx,ny;					//nx = ncols, ny = nrows
 	  T*		v;
 	};
@@ -585,70 +575,12 @@ template <class T> void FIELD<T>::writePPM(const char* fname) const
    fclose(fp);
 }
 
-template <class T> void FIELD<T>::display(const char* t)
-{
-   int w = glutCreateWindow((t)? t : "Field Display");
-   glutDisplayFunc(draw_cb);
-   glutReshapeFunc(reshape);
-   typename std::map<int,FIELD*>::value_type v(w,this);
-   fields.insert(v);
-}
-
-template <class T> void FIELD<T>::drawColor(bool b)
-{  draw_color = b; glutPostRedisplay(); }
-
-template <class T> void FIELD<T>::display(int id,const char* t)
-{
-   int cnt=0;
-   typename std::map<int,FIELD*>::iterator i;
-   for(i=fields.begin();cnt<id && i!=fields.end();i++,cnt++);
-   if (i==fields.end()) return;
-
-   int w = (*i).first;
-   fields.erase(i);
-   typename std::map<int,FIELD*>::value_type v(w,this);
-   fields.insert(v);
-   if (t) { glutSetWindow(w); glutSetWindowTitle(t); }
-}
-
-template <class T> void FIELD<T>::draw_cb()
-{
-   typename std::map<int,FIELD*>::iterator i = fields.find(glutGetWindow());
-   if (i!=fields.end()) (*i).second->draw();
-}
-
-template <class T> void FIELD<T>::draw()
-{
-   glClear(GL_COLOR_BUFFER_BIT);
-   static unsigned char buf[800*800*3];
-   float m,M,avg; minmax(m,M,avg);
-   const float* d = data(); int j=0;
-   for(int i=dimY()-1;i>=0;i--)
-     for(const float *s=d+dimX()*i, *e=s+dimX();s<e;s++)
-     {
-       float r,g,b,v = ((*s)-m)/(M-m);
-       v = (v>0)?v:0;
-       if (v>M) { r=g=b=1; } else v = (v<1)?v:1;
-       if (draw_color)
-          float2rgb(v,r,g,b);
-       else
-	  r=g=b=1-v;
-       buf[j++] = (unsigned char)(int)(255*r);
-       buf[j++] = (unsigned char)(int)(255*g);
-       buf[j++] = (unsigned char)(int)(255*b);
-     }
-
-   glPixelStorei(GL_UNPACK_ALIGNMENT,1);
-   glDrawPixels(dimX(),dimY(),GL_RGB,GL_UNSIGNED_BYTE,buf);
-   glutSwapBuffers();
-}
-
 template <class T> void FIELD<T>::reshape(int w, int h)
 {
- 	glViewport(0.0f, 0.0f, (GLfloat)w, (GLfloat)h);
-	glMatrixMode(GL_PROJECTION);
-	glLoadIdentity();
-	gluOrtho2D(0.0, (GLdouble)w, 0.0, (GLdouble)h);
+    glViewport(0.0f, 0.0f, (GLfloat)w, (GLfloat)h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluOrtho2D(0.0, (GLdouble)w, 0.0, (GLdouble)h);
 }
 
 #pragma clang diagnostic pop
