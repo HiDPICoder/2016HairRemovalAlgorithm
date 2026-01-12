@@ -1,9 +1,6 @@
 Digital Hair Removal by Threshold Decomposition
 
 (c) Joost Koehoorn, Alex Telea, Univ. of Groningen, 2014
-
-Updated in 2026
-
 ====================================================================================================================
 
 This software package implements the digital hair removal algorithm using CUDA and the Parallel Banding Algorithm and AFMM
@@ -11,27 +8,20 @@ for fast skeletonization and morphological erosion/dilation.
 
 1. Building
 ===========
-Windows:
-Download CMake.
-Download Visual Studio.
-Install Desktop development with C++.
-Install Cuda toolkit.
-Open CMake Gui put in source path, put in output path.
-Click Configure.
-Click Generate.
-Click Open Project.
-Right click on hairrazor project and click build.
-Locate the exe and you can run it now.
 
-Linux:
-Install Cuda toolkit.
-Ensure your os sees your nvidia drive. Enrolling moik key should be enough to make it visible.
-Copy main.cpp from Original Code folder to Code folder.
-Configure Makefile with your cuda architecture modify line 46: -gencode arch=compute_61,code=sm_61 \
-Afterwards for Linux mint it was enough to just call Makefile.
+make
 
-Note 1: For Cuda version 11.5 you can simply build Original Code.
-Note 2: You might have to tinker with source code to get it working on linux machine.
+The software needs a C++ compiler, OpenGL, the CUDA 1.1 SDK, and GLUT to build. It may be necessary to modify the
+makefile and/or do some small-scale #include adaptions to cope with variations on where the GL, GLUT, and CUDA headers
+are. The build was tested on Mac OS X 10.9/10.10 with gcc 4.9 and on Linux with gcc 4.6.
+
+The makefile tries to detect if the platform supports MPI by checking if `mpirun` is available in $PATH. To override
+this, simply hardcode the value for `MPI_SUPPORT` to either 0 or 1.
+
+A basic GUI to interactively change parameters is provided when GUI_SUPPORT is set to 1. This requires linking with
+the GLUI library, of which a Mac OS and Linux64 compiled library is provided, but recompiling GLUI from source may be
+necessary on other platforms.
+
 2. Running
 ==========
 
@@ -64,3 +54,11 @@ Single image
 The input image must be provided in PPM format. The output file is written into ./output/inpainted.ppm alongside various
 intermediate images, however using `-o path` a different output path can be given. When compiled with GUI support, provide
 `-g` to open a GUI where parameters may be changed interactively.
+
+Batch processing
+----------------
+
+./batch [options] -- paths...
+
+A separate program for batch processing is provided. Options to `hairrazor` can be specified by separating the paths by
+using two dashes. Output files are written to ./output/{image.ppm}/inpainted.ppm.
